@@ -3,6 +3,8 @@ const puppeteer = require('puppeteer-core');
 const rateLimit = require('express-rate-limit');
 
 const app = express();
+
+const fetch = global.fetch || require('node-fetch');
 app.set('trust proxy', true);
 
 const PORT = process.env.PORT || 3000;
@@ -187,12 +189,14 @@ app.post('/pdf', async (req, res) => {
   let browser;
 
   try {
-    const { html, url, domainName, fields = {}, options = {} } = req.body;
-    if (!html && !url) return res.status(400).send('Missing html or url');
-    // Validate URL
-    if (!url || !validateUrl(url)) {
+    const { html, url, domainName, fields = {} } = req.body;
+    if (!html && !url) {
+      return res.status(400).json({ error: 'Missing html or url' });
+    }
+
+    if (url && !validateUrl(url)) {
       return res.status(400).json({
-        error: 'Valid URL is required (must include http:// or https://)'
+        error: 'Valid URL is required (http/https)'
       });
     }
     // ----------------- Fetch binary data -----------------
@@ -202,9 +206,19 @@ app.post('/pdf', async (req, res) => {
       if (!data) continue;
       if (data.startsWith('http://') || data.startsWith('https://')) {
         try {
+          console.log('Fetching binary data for key:', key, 'from txnID:', data, " via domain:", domainName);
           const response = await fetch(
-            `${domainName}/track/mgt?page=displayS3Data&pageName=formDataDisplay&txnID=${encodeURIComponent(data)}`
-          );
+               `${domainName}/track/mgt?page=displayS3Data&pageName=formDataDisplay`,
+               {
+                 method: 'POST',
+                 headers: {
+                   'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                 },
+                 body: new URLSearchParams({
+                   txnID: data
+                 }).toString()
+               }
+             ); 
           fieldData[key] = await response.text();
         } catch (err) {
           console.error('Failed to fetch binary for', key, err);
@@ -371,8 +385,8 @@ app.post('/pdf', async (req, res) => {
           <div style="font-size:10px; width:100%; text-align:center; color:#555;">
             Page <span class="pageNumber"></span> of <span class="totalPages"></span>
           </div>
-        `,
-      ...options
+        `
+
     });
 
     res.setHeader('Content-Type', 'application/pdf');
@@ -381,9 +395,6 @@ app.post('/pdf', async (req, res) => {
     res.status(200).end(pdf, 'binary');
 
   } catch (error) {
-    if (browser && browser.process() != null) {
-      await browser.close().catch(e => console.error('Error closing browser:', e));
-    }
 
     console.error('PDF generation error:', error);
 

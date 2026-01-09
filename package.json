@@ -1,0 +1,23 @@
+{
+  "name": "puppeteer-fargate-service",
+  "version": "1.0.0",
+  "description": "Puppeteer microservice for screenshots and PDF generation",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "puppeteer-core": "^24.15.0",
+    "express-rate-limit": "^7.1.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "jest": "^29.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -187,7 +187,7 @@ app.post('/pdf', async (req, res) => {
   let browser;
 
   try {
-    const { html, url, domainName, fields = {} } = req.body;
+    const { html, url, domainName, fields = {}, options = {} } = req.body;
     if (!html && !url) return res.status(400).send('Missing html or url');
     // Validate URL
     if (!url || !validateUrl(url)) {

@@ -190,91 +190,128 @@ app.post('/pdf', async (req, res) => {
 
   try {
     const { html, url, domainName, fields = {} } = req.body;
+
     if (!html && !url) {
       return res.status(400).json({ error: 'Missing html or url' });
     }
 
     if (url && !validateUrl(url)) {
-      return res.status(400).json({
-        error: 'Valid URL is required (http/https)'
-      });
+      return res.status(400).json({ error: 'Valid URL is required (http/https)' });
     }
-    // ----------------- Fetch binary data -----------------
+
+    /* -------------------------------------------------------
+       FETCH BINARY DATA (SIGNATURES / FILE INPUTS)
+    ------------------------------------------------------- */
     const fieldData = {};
+
     for (const key of Object.keys(fields)) {
       const data = fields[key];
       if (!data) continue;
+
       if (data.startsWith('http://') || data.startsWith('https://')) {
         try {
-          console.log('Fetching binary data for key:', key, 'from txnID:', data, " via domain:", domainName);
           const response = await fetch(
-               `${domainName}/track/mgt?page=displayS3Data&pageName=formDataDisplay`,
-               {
-                 method: 'POST',
-                 headers: {
-                   'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
-                 },
-                 body: new URLSearchParams({
-                   txnID: data
-                 }).toString()
-               }
-             ); 
+            `${domainName}/track/mgt?page=displayS3Data&pageName=formDataDisplay`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+              },
+              body: new URLSearchParams({ txnID: data }).toString()
+            }
+          );
           fieldData[key] = await response.text();
         } catch (err) {
-          console.error('Failed to fetch binary for', key, err);
+          console.error('Binary fetch failed for:', key, err);
           fieldData[key] = null;
         }
       }
-
     }
 
-    // ----------------- Launch Puppeteer -----------------
-    /*  browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-      }); */
+    /* -------------------------------------------------------
+       LAUNCH PUPPETEER
+    ------------------------------------------------------- */
     browser = await launchBrowser();
 
     const page = await browser.newPage();
-
-    page.on('console', msg => console.log('PAGE LOG:', msg.text()));
+    page.on('console', msg => console.log('PAGE:', msg.text()));
 
     if (url) {
-      await page.goto(url, {
-        waitUntil: 'networkidle0', timeout: 60000
-      });
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     } else {
-      await page.setContent(html, { waitUntil: 'networkidle0' });
+      await page.setContent(html, { waitUntil: 'domcontentloaded' });
     }
 
-    // Emulate print media for better PDF rendering
+    /* -------------------------------------------------------
+       WAIT FOR LOADERS / SPINNERS TO DISAPPEAR
+    ------------------------------------------------------- */
+    await page.evaluate(async () => {
+      const waitFor = (fn, timeout = 30000) =>
+        new Promise((resolve, reject) => {
+          const start = Date.now();
+          const timer = setInterval(() => {
+            if (fn()) {
+              clearInterval(timer);
+              resolve();
+            }
+            if (Date.now() - start > timeout) {
+              clearInterval(timer);
+              reject('Timeout waiting for UI');
+            }
+          }, 300);
+        });
+
+      await waitFor(() => {
+        const spinner =
+          document.querySelector('.loading') ||
+          document.querySelector('.spinner') ||
+          document.querySelector('[class*="loading"]') ||
+          document.querySelector('[class*="spinner"]') ||
+          document.querySelector('[aria-busy="true"]');
+
+        return !spinner || spinner.offsetParent === null;
+      });
+    });
+
+    /* -------------------------------------------------------
+       LET UI STABILIZE
+    ------------------------------------------------------- */
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    await page.evaluate(() => document.body.offsetHeight);
+
+    /* -------------------------------------------------------
+       PRINT CSS (CRITICAL)
+    ------------------------------------------------------- */
     await page.emulateMediaType('print');
 
-    // ----------------- Print-safe CSS -----------------
     await page.addStyleTag({
       content: `
-          table { page-break-inside: auto; border-collapse: collapse; width: 100%; }
-          tr { page-break-inside: avoid; page-break-after: auto; }
-          thead { display: table-header-group; }
-          tfoot { display: table-footer-group; }
-          canvas { page-break-inside: avoid; display: block; margin-bottom: 10px; }
-          .pdf-image-wrapper { page-break-inside: avoid; margin-bottom: 20px; }
-          .pdf-file-label { font-size: 12px; margin-top: 6px; color: #333; word-break: break-word; }
-          body { margin: 0; padding: 0; background: inherit; }
-        `
+        body { margin:0; padding:0; background:white; }
+        table { width:100%; border-collapse:collapse; page-break-inside:auto; }
+        tr { page-break-inside:avoid; }
+        thead { display:table-header-group; }
+        canvas { display:block; page-break-inside:avoid; }
+        .loading, .spinner { display:none !important; }
+      `
     });
 
     const PDF_MARGIN = 40;
     const PAGE_WIDTH = 595 - 2 * PDF_MARGIN;
     const PAGE_HEIGHT = 842 - 2 * PDF_MARGIN;
 
-    // ----------------- Fill fields & render images/signatures -----------------
-    await page.evaluate((fields, fieldData, PAGE_WIDTH, PAGE_HEIGHT) => {
+    /* -------------------------------------------------------
+       FILL FIELDS + RENDER FILES & SIGNATURES (SYNC SAFE)
+    ------------------------------------------------------- */
+    await page.evaluate(async (fields, fieldData, PAGE_WIDTH, PAGE_HEIGHT) => {
+
+      const waitImage = img =>
+        new Promise(res => (img.complete ? res() : (img.onload = res)));
+
       // Fill form fields
       for (const [name, value] of Object.entries(fields)) {
         const el = document.querySelector(`[name="${name}"]`) || document.getElementById(name);
         if (!el) continue;
-        if (el.tagName === 'INPUT' && el.type === 'file') continue;
+
         if (el.tagName === 'SELECT') {
           el.innerHTML = `<option selected>${value}</option>`;
         } else if (el.type === 'checkbox' || el.type === 'radio') {
@@ -284,141 +321,84 @@ app.post('/pdf', async (req, res) => {
         }
       }
 
-      // FILE INPUTS → IMAGE/LABEL with multi-page support
+      // File inputs → images
       const fileInputs = [...document.querySelectorAll('input[type="file"]')];
-      fileInputs.forEach(input => {
-        const key = input.name?.trim();
+
+      for (const input of fileInputs) {
+        const key = input.name;
         const data = fieldData[key];
-        if (!data) return;
+        if (!data || !data.startsWith('data:image')) continue;
 
         input.style.display = 'none';
-        const wrapper = document.createElement('div');
-        wrapper.className = 'pdf-image-wrapper';
 
-        if (data.startsWith('data:image')) {
-          const img = new Image();
-          img.src = data;
-          img.onload = () => {
-            const scale = Math.min(1, PAGE_WIDTH / img.width);
-            const width = img.width * scale;
-            let height = img.height * scale;
-            let yOffset = 0;
-
-            while (yOffset < height) {
-              const canvas = document.createElement('canvas');
-              const ctx = canvas.getContext('2d');
-              const sliceHeight = Math.min(PAGE_HEIGHT, height - yOffset);
-
-              canvas.width = width;
-              canvas.height = sliceHeight;
-
-              ctx.drawImage(img, 0, yOffset / scale, img.width, sliceHeight / scale, 0, 0, width, sliceHeight);
-              wrapper.appendChild(canvas);
-
-              yOffset += sliceHeight;
-            }
-          };
-        } else {
-          const label = document.createElement('div');
-          label.className = 'pdf-file-label';
-          label.textContent = `Attached file: ${key}`;
-          wrapper.appendChild(label);
-        }
-
-        const nameLabel = document.createElement('div');
-        nameLabel.className = 'pdf-file-label';
-        nameLabel.textContent = key;
-        wrapper.appendChild(nameLabel);
-
-        input.after(wrapper);
-      });
-
-      // SIGNATURE CANVASES
-      const canvases = [...document.querySelectorAll('canvas')];
-      canvases.forEach(canvas => {
-        const key = canvas.getAttribute('name')?.trim();
-        const data = fieldData[key];
-        if (!data || !data.startsWith('data:image')) return;
-
-        const ctx = canvas.getContext('2d');
         const img = new Image();
         img.src = data;
-        img.onload = () => {
-          const scale = Math.min(1, PAGE_WIDTH / img.width);
-          const width = img.width * scale;
-          let height = img.height * scale;
-          let yOffset = 0;
+        await waitImage(img);
 
-          while (yOffset < height) {
-            const sliceCanvas = document.createElement('canvas');
-            const sliceCtx = sliceCanvas.getContext('2d');
-            const sliceHeight = Math.min(PAGE_HEIGHT, height - yOffset);
+        const scale = Math.min(1, PAGE_WIDTH / img.width);
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
 
-            sliceCanvas.width = width;
-            sliceCanvas.height = sliceHeight;
-            sliceCtx.drawImage(img, 0, yOffset / scale, img.width, sliceHeight / scale, 0, 0, width, sliceHeight);
-            canvas.parentNode.insertBefore(sliceCanvas, canvas.nextSibling);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-            yOffset += sliceHeight;
-          }
-          canvas.remove();
-        };
-      });
+        input.after(canvas);
+      }
+
+      // Signature canvases
+      const sigCanvases = [...document.querySelectorAll('canvas[name]')];
+
+      for (const canvas of sigCanvases) {
+        const key = canvas.getAttribute('name');
+        const data = fieldData[key];
+        if (!data) continue;
+
+        const img = new Image();
+        img.src = data;
+        await waitImage(img);
+
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      }
 
     }, fields, fieldData, PAGE_WIDTH, PAGE_HEIGHT);
 
-    // Optional debug HTML
-    if (process.env.DEBUG_PDF === 'true') {
-      const fs = require('fs');
-      fs.writeFileSync('debug-rendered.html', await page.content());
-    }
+    /* -------------------------------------------------------
+       FINAL WAIT (VERY IMPORTANT)
+    ------------------------------------------------------- */
+    await new Promise(resolve => setTimeout(resolve, 500));
 
-    // ----------------- Generate PDF with page numbers -----------------
+
+    /* -------------------------------------------------------
+       GENERATE PDF
+    ------------------------------------------------------- */
     const pdf = await page.pdf({
       format: 'A4',
       printBackground: true,
       preferCSSPageSize: true,
       margin: { top: '40px', bottom: '60px', left: '40px', right: '40px' },
       displayHeaderFooter: true,
-      headerTemplate: '<div></div>', // empty header
+      headerTemplate: '<div></div>',
       footerTemplate: `
-          <div style="font-size:10px; width:100%; text-align:center; color:#555;">
-            Page <span class="pageNumber"></span> of <span class="totalPages"></span>
-          </div>
-        `
-
+        <div style="font-size:10px;width:100%;text-align:center;">
+          Page <span class="pageNumber"></span> of <span class="totalPages"></span>
+        </div>`
     });
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Length', pdf.length);
     res.setHeader('Content-Disposition', `attachment; filename="document-${Date.now()}.pdf"`);
-    res.status(200).end(pdf, 'binary');
+    res.status(200).end(pdf);
 
-  } catch (error) {
-
-    console.error('PDF generation error:', error);
-
-    let statusCode = 500;
-    let errorMessage = 'Failed to generate PDF';
-
-    if (error.message.includes('net::ERR_CONNECTION_REFUSED') ||
-      error.message.includes('net::ERR_NAME_NOT_RESOLVED')) {
-      statusCode = 400;
-      errorMessage = 'Cannot connect to the URL or domain not found';
-    } else if (error.message.includes('Timeout')) {
-      statusCode = 408;
-      errorMessage = 'Request timeout - the page took too long to load';
-    }
-
-    res.status(statusCode).json({
-      error: errorMessage,
-      message: error.message,
-      timestamp: new Date().toISOString()
-    });
+  } catch (err) {
+    console.error('PDF ERROR:', err);
+    res.status(500).json({ error: 'PDF generation failed', message: err.message });
   } finally {
     if (browser) await browser.close();
   }
 });
+
 
 /**
  * PDF generation endpoint

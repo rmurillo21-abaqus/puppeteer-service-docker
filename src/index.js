@@ -315,7 +315,7 @@ app.post('/pdf', async (req, res) => {
         if (el.tagName === 'SELECT') {
           el.innerHTML = `<option selected>${value}</option>`;
         } else if (el.type === 'checkbox' || el.type === 'radio') {
-          el.checked = value === true || value === 'Yes' || value === 'true' || value === 'On' || value === 'on' || value === 'yes' ;
+          el.checked = value === true || value === 'Yes' || value === 'true' || value === 'On' || value === 'on' || value === 'yes';
         } else if ('value' in el) {
           el.value = value ?? '';
         }

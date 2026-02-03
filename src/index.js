@@ -304,13 +304,27 @@ app.post('/pdf', async (req, res) => {
     ------------------------------------------------------- */
     await page.evaluate(async (fields, fieldData, PAGE_WIDTH, PAGE_HEIGHT) => {
 
-      const waitImage = img =>
-        new Promise(res => (img.complete ? res() : (img.onload = res)));
+      const waitImage = (img, timeout = 15000) =>
+        new Promise(resolve => {
+          const done = () => resolve();
+
+          if (img.complete) return done();
+
+          const t = setTimeout(done, timeout);
+          img.onload = () => { clearTimeout(t); done(); };
+          img.onerror = () => { clearTimeout(t); done(); };
+        });
 
       // Fill form fields
       for (const [name, value] of Object.entries(fields)) {
         const el = document.querySelector(`[name="${name}"]`) || document.getElementById(name);
         if (!el) continue;
+
+
+        // IMPORTANT: never set value for file inputs (browser security restriction)
+        if (el.tagName === 'INPUT' && el.type === 'file') {
+          continue;
+        }
 
         if (el.tagName === 'SELECT') {
           el.innerHTML = `<option selected>${value}</option>`;

@@ -189,7 +189,7 @@ app.post('/pdf', async (req, res) => {
   let browser;
 
   try {
-    const { html, url, domainName, fields = {} } = req.body;
+    const { html, url, domainName, headerInfo = {}, fields = {} } = req.body;
 
     if (!html && !url) {
       return res.status(400).json({ error: 'Missing html or url' });
@@ -330,6 +330,13 @@ app.post('/pdf', async (req, res) => {
           el.innerHTML = `<option selected>${value}</option>`;
         } else if (el.type === 'checkbox' || el.type === 'radio') {
           el.checked = value === true || value === 'Yes' || value === 'true' || value === 'On' || value === 'on' || value === 'yes';
+        } else if (el.tagName === 'TEXTAREA') {
+          el.value = value ?? '';
+          el.innerHTML = value ?? '';
+          // Ensure text wraps properly in PDF
+          el.style.whiteSpace = 'pre-wrap';
+          el.style.wordBreak = 'break-word';
+          el.style.wordWrap = 'break-word';
         } else if ('value' in el) {
           el.value = value ?? '';
         }
@@ -377,6 +384,24 @@ app.post('/pdf', async (req, res) => {
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       }
 
+      // ✅ FIX: Ensure textarea values are visible in PDF
+      const textareas = document.querySelectorAll('textarea');
+      textareas.forEach(el => {
+        /* const div = document.createElement('div');
+         div.textContent = el.value || '';
+
+         div.style.whiteSpace = 'pre-wrap';
+         div.style.wordBreak = 'break-word';
+         div.style.width = '100%';
+         div.style.fontSize = window.getComputedStyle(el).fontSize;
+         div.style.fontFamily = window.getComputedStyle(el).fontFamily; */
+
+        el.style.height = 'auto';
+        // Set height to match the internal content height
+        el.style.height = (el.scrollHeight) + 'px';
+        // el.replaceWith(div);
+      });
+
     }, fields, fieldData, PAGE_WIDTH, PAGE_HEIGHT);
 
     /* -------------------------------------------------------
@@ -392,9 +417,46 @@ app.post('/pdf', async (req, res) => {
       format: 'A4',
       printBackground: true,
       preferCSSPageSize: true,
-      margin: { top: '40px', bottom: '60px', left: '40px', right: '40px' },
+      margin: { top: '70px', bottom: '60px', left: '40px', right: '40px' },
       displayHeaderFooter: true,
-      headerTemplate: '<div></div>',
+      headerTemplate: `<div style="
+  width:100%;
+  font-family: Arial, sans-serif;
+  font-size:10px;
+  color:#333;
+  padding:6px 40px;
+  box-sizing:border-box;
+">
+  
+  <table style="width:100%; border-bottom:1px solid #e5e7eb; padding-bottom:6px;">
+    <tr>
+      
+      <!-- LEFT -->
+      <td style="text-align:left; vertical-align:middle;">
+        <div style="font-size:11px;">
+          <span style="color:#6b7280; font-weight:500; margin-right:4px;">
+            User:
+          </span>
+          <span style="color:#6b7280; font-weight:500;">
+            ${headerInfo?.user || ''}
+          </span>
+        </div>
+      </td>
+
+      <!-- RIGHT -->
+      <td style="text-align:right; vertical-align:middle;">
+        <div style="font-size:9px; color:#6b7280;">
+          Submitted on
+        </div>
+        <div style="font-weight:500; color:#111; font-size:10px;">
+          ${headerInfo?.date || ''}
+        </div>
+      </td>
+
+    </tr>
+  </table>
+
+</div>`,
       footerTemplate: `
         <div style="font-size:10px;width:100%;text-align:center;">
           Page <span class="pageNumber"></span> of <span class="totalPages"></span>

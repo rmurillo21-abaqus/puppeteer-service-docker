@@ -236,6 +236,13 @@ app.post('/pdf', async (req, res) => {
     browser = await launchBrowser();
 
     const page = await browser.newPage();
+    // Set a desktop-class width to prevent the CSS @media queries 
+    // from triggering the "Mobile" responsive layout.
+    await page.setViewport({
+      width: 1280, // High enough to stay above the 768px mobile breakpoint
+      height: 800,
+      deviceScaleFactor: 1,
+    });
     page.on('console', msg => console.log('PAGE:', msg.text()));
 
     if (url) {
@@ -285,6 +292,39 @@ app.post('/pdf', async (req, res) => {
        PRINT CSS (CRITICAL)
     ------------------------------------------------------- */
     await page.emulateMediaType('print');
+
+    await page.addStyleTag({
+      content: `
+    /* Force the desktop layout and prevent column stacking */
+    @media print {
+      .table-responsive {
+        overflow: visible !important;
+        width: 100% !important;
+      }
+      
+      table {
+        min-width: auto !important; /* Overrides the 800px min-width */
+        width: 100% !important;
+        table-layout: fixed !important; /* Forces columns to stay in-bounds */
+      }
+
+      th, td {
+        word-wrap: break-word !important;
+        font-size: 8px !important; /* Reduce font size to fit all columns */
+        padding: 4px !important;
+      }
+
+      /* Hide the 'es' (Spanish) sub-labels to save vertical and horizontal space */
+      .es { display: none !important; }
+      
+      /* Ensure horizontal layout for headers */
+      .grid.header, .inline, .split {
+        display: grid !important;
+        grid-template-columns: 1fr 1fr !important;
+      }
+    }
+  `
+    });
 
     await page.addStyleTag({
       content: `
@@ -448,7 +488,7 @@ app.post('/pdf', async (req, res) => {
     const pdf = await page.pdf({
       format: 'A4',
       printBackground: true,
-      preferCSSPageSize: true,
+      preferCSSPageSize: false,
       margin: { top: '70px', bottom: '60px', left: '40px', right: '40px' },
       displayHeaderFooter: true,
       headerTemplate: `<div style="

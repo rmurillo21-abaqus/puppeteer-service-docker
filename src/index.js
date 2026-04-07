@@ -191,7 +191,7 @@ app.post('/pdf', async (req, res) => {
   let browser;
 
   try {
-    const { html, url, domainName, headerInfo = {}, fields = {} } = req.body;
+    const { html, url, domainName, dateDisplayFormat, headerInfo = {}, fields = {} } = req.body;
 
     if (!html && !url) {
       return res.status(400).json({ error: 'Missing html or url' });
@@ -304,7 +304,7 @@ app.post('/pdf', async (req, res) => {
     /* -------------------------------------------------------
        FILL FIELDS + RENDER FILES & SIGNATURES (SYNC SAFE)
     ------------------------------------------------------- */
-    await page.evaluate(async (fields, fieldData, PAGE_WIDTH, PAGE_HEIGHT) => {
+    await page.evaluate(async (fields, fieldData, dateDisplayFormat, PAGE_WIDTH, PAGE_HEIGHT) => {
 
       const waitImage = (img, timeout = 15000) =>
         new Promise(resolve => {
@@ -317,30 +317,59 @@ app.post('/pdf', async (req, res) => {
           img.onerror = () => { clearTimeout(t); done(); };
         });
 
+      // HELPER: Simple Date Formatter
+      const formatDataValue = (rawVal, fmt) => {
+        const d = new Date(rawVal);
+        if (isNaN(d.getTime())) return rawVal; // Return original if not a valid date
+
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const yyyy = d.getFullYear();
+        const yy = String(yyyy).slice(-2);
+
+        // Replace tokens in the format string
+        return fmt
+          .replace(/YYYY/g, yyyy)
+          .replace(/YY/g, yy)
+          .replace(/MM/g, mm)
+          .replace(/DD/g, dd)
+          .replace(/dd/g, dd); // Handle lowercase dd too
+      };
+
       // Fill form fields
       for (const [name, value] of Object.entries(fields)) {
-        const el = document.querySelector(`[name="${name}"]`) || document.getElementById(name);
-        if (!el) continue;
+        try {
+          const el = document.querySelector(`[name="${name}"]`) || document.getElementById(name);
+          if (!el) continue;
 
 
-        // IMPORTANT: never set value for file inputs (browser security restriction)
-        if (el.tagName === 'INPUT' && el.type === 'file') {
-          continue;
-        }
-
-        if (el.tagName === 'SELECT') {
-          el.innerHTML = `<option selected>${value}</option>`;
-        } else if (el.type === 'checkbox' || el.type === 'radio') {
-          el.checked = value === true || value === 'Yes' || value === 'true' || value === 'On' || value === 'on' || value === 'yes';
-        } else if (el.tagName === 'TEXTAREA') {
-          el.value = value ?? '';
-          el.innerHTML = value ?? '';
-          // Ensure text wraps properly in PDF
-          el.style.whiteSpace = 'pre-wrap';
-          el.style.wordBreak = 'break-word';
-          el.style.wordWrap = 'break-word';
-        } else if ('value' in el) {
-          el.value = value ?? '';
+          // IMPORTANT: never set value for file inputs (browser security restriction)
+          if (el.tagName === 'INPUT' && el.type === 'file') {
+            continue;
+          }
+          if (name.toLowerCase().includes('date')) {
+            // Force type to text so the browser doesn't use its internal US-format display
+            el.type = 'text';
+            // Convert the raw date to the requested format
+            el.value = formatDataValue(value ?? '', dateDisplayFormat);
+            continue;
+          }
+          if (el.tagName === 'SELECT') {
+            el.innerHTML = `<option selected>${value}</option>`;
+          } else if (el.type === 'checkbox' || el.type === 'radio') {
+            el.checked = value === true || value === 'Yes' || value === 'true' || value === 'On' || value === 'on' || value === 'yes';
+          } else if (el.tagName === 'TEXTAREA') {
+            el.value = value ?? '';
+            el.innerHTML = value ?? '';
+            // Ensure text wraps properly in PDF
+            el.style.whiteSpace = 'pre-wrap';
+            el.style.wordBreak = 'break-word';
+            el.style.wordWrap = 'break-word';
+          } else if ('value' in el) {
+            el.value = value ?? '';
+          }
+        } catch (fieldErr) {
+          console.error(`Error filling field ${name}:`, value);
         }
       }
 
@@ -404,7 +433,7 @@ app.post('/pdf', async (req, res) => {
         // el.replaceWith(div);
       });
 
-    }, fields, fieldData, PAGE_WIDTH, PAGE_HEIGHT);
+    }, fields, fieldData, dateDisplayFormat, PAGE_WIDTH, PAGE_HEIGHT);
 
     /* -------------------------------------------------------
        FINAL WAIT (VERY IMPORTANT)

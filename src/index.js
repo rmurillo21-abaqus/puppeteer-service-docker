@@ -191,7 +191,7 @@ app.post('/pdf', async (req, res) => {
   let browser;
 
   try {
-    const { html, url, domainName, dateDisplayFormat, headerInfo = {}, fields = {} } = req.body;
+    const { html, url, domainName, dateDisplayFormat = "DD/MM/YYYY", headerInfo = {}, fields = {} } = req.body;
 
     if (!html && !url) {
       return res.status(400).json({ error: 'Missing html or url' });
@@ -319,6 +319,7 @@ app.post('/pdf', async (req, res) => {
 
       // HELPER: Simple Date Formatter
       const formatDataValue = (rawVal, fmt) => {
+        if (!fmt || typeof fmt !== 'string') return rawVal;
         const d = new Date(rawVal);
         if (isNaN(d.getTime())) return rawVal; // Return original if not a valid date
 

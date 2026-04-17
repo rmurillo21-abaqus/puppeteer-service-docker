@@ -294,7 +294,7 @@ app.post('/pdf', async (req, res) => {
         thead { display:table-header-group; }
         canvas { display:block; page-break-inside:avoid; }
         .loading, .spinner { display:none !important; }
-      `
+        `
     });
 
     const PDF_MARGIN = 40;
@@ -331,46 +331,45 @@ app.post('/pdf', async (req, res) => {
         // Replace tokens in the format string
         return fmt
           .replace(/YYYY/g, yyyy)
+          .replace(/yyyy/g, yyyy)
           .replace(/YY/g, yy)
+          .replace(/yy/g, yy)
           .replace(/MM/g, mm)
+          .replace(/mm/g, mm)
           .replace(/DD/g, dd)
           .replace(/dd/g, dd); // Handle lowercase dd too
       };
 
       // Fill form fields
       for (const [name, value] of Object.entries(fields)) {
-        try {
-          const el = document.querySelector(`[name="${name}"]`) || document.getElementById(name);
-          if (!el) continue;
+        const el = document.querySelector(`[name="${name}"]`) || document.getElementById(name);
+        if (!el) continue;
 
 
-          // IMPORTANT: never set value for file inputs (browser security restriction)
-          if (el.tagName === 'INPUT' && el.type === 'file') {
-            continue;
-          }
-          if (name.toLowerCase().includes('date')) {
-            // Force type to text so the browser doesn't use its internal US-format display
-            el.type = 'text';
-            // Convert the raw date to the requested format
-            el.value = formatDataValue(value ?? '', dateDisplayFormat);
-            continue;
-          }
-          if (el.tagName === 'SELECT') {
-            el.innerHTML = `<option selected>${value}</option>`;
-          } else if (el.type === 'checkbox' || el.type === 'radio') {
-            el.checked = value === true || value === 'Yes' || value === 'true' || value === 'On' || value === 'on' || value === 'yes';
-          } else if (el.tagName === 'TEXTAREA') {
-            el.value = value ?? '';
-            el.innerHTML = value ?? '';
-            // Ensure text wraps properly in PDF
-            el.style.whiteSpace = 'pre-wrap';
-            el.style.wordBreak = 'break-word';
-            el.style.wordWrap = 'break-word';
-          } else if ('value' in el) {
-            el.value = value ?? '';
-          }
-        } catch (fieldErr) {
-          console.error(`Error filling field ${name}:`, value);
+        // IMPORTANT: never set value for file inputs (browser security restriction)
+        if (el.tagName === 'INPUT' && el.type === 'file') {
+          continue;
+        }
+        if (name.toLowerCase().includes('date')) {
+          // Force type to text so the browser doesn't use its internal US-format display
+          el.type = 'text';
+          // Convert the raw date to the requested format
+          el.value = formatDataValue(value ?? '', dateDisplayFormat);
+          continue;
+        }
+        if (el.tagName === 'SELECT') {
+          el.innerHTML = `<option selected>${value}</option>`;
+        } else if (el.type === 'checkbox' || el.type === 'radio') {
+          el.checked = value === true || value === 'Yes' || value === 'true' || value === 'On' || value === 'on' || value === 'yes';
+        } else if (el.tagName === 'TEXTAREA') {
+          el.value = value ?? '';
+          el.innerHTML = value ?? '';
+          // Ensure text wraps properly in PDF
+          el.style.whiteSpace = 'pre-wrap';
+          el.style.wordBreak = 'break-word';
+          el.style.wordWrap = 'break-word';
+        } else if ('value' in el) {
+          el.value = value ?? '';
         }
       }
 
@@ -501,7 +500,336 @@ app.post('/pdf', async (req, res) => {
   }
 });
 
+/**
+ * 
+ * Testing endpoint for generating pdf on connector only
+ */
+app.post('/connector-pdf', async (req, res) => {
 
+  let browser;
+
+  try {
+    const { html, url, domainName, dateDisplayFormat = "DD/MM/YYYY", headerInfo = {}, fields = {} } = req.body;
+
+    if (!html && !url) {
+      return res.status(400).json({ error: 'Missing html or url' });
+    }
+
+    if (url && !validateUrl(url)) {
+      return res.status(400).json({ error: 'Valid URL is required (http/https)' });
+    }
+
+    /* -------------------------------------------------------
+       FETCH BINARY DATA (SIGNATURES / FILE INPUTS)
+    ------------------------------------------------------- */
+    const fieldData = {};
+
+    for (const key of Object.keys(fields)) {
+      const data = fields[key];
+      if (!data) continue;
+
+      if ((data.includes('amazonaws.com')) && (data.startsWith('http://') || data.startsWith('https://'))) {
+        try {
+          const response = await fetch(
+            `${domainName}/track/mgt?page=displayS3Data&pageName=formDataDisplay`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+              },
+              body: new URLSearchParams({ txnID: data }).toString()
+            }
+          );
+          fieldData[key] = await response.text();
+        } catch (err) {
+          console.error('Binary fetch failed for:', key, err);
+          fieldData[key] = null;
+        }
+      }
+    }
+
+    /* -------------------------------------------------------
+       LAUNCH PUPPETEER
+    ------------------------------------------------------- */
+    browser = await launchBrowser();
+
+    const page = await browser.newPage();
+    page.on('console', msg => console.log('PAGE:', msg.text()));
+
+    if (url) {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    } else {
+      await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    }
+
+    /* -------------------------------------------------------
+       WAIT FOR LOADERS / SPINNERS TO DISAPPEAR
+    ------------------------------------------------------- */
+    await page.evaluate(async () => {
+      const waitFor = (fn, timeout = 30000) =>
+        new Promise((resolve, reject) => {
+          const start = Date.now();
+          const timer = setInterval(() => {
+            if (fn()) {
+              clearInterval(timer);
+              resolve();
+            }
+            if (Date.now() - start > timeout) {
+              clearInterval(timer);
+              reject('Timeout waiting for UI');
+            }
+          }, 300);
+        });
+
+      await waitFor(() => {
+        const spinner =
+          document.querySelector('.loading') ||
+          document.querySelector('.spinner') ||
+          document.querySelector('[class*="loading"]') ||
+          document.querySelector('[class*="spinner"]') ||
+          document.querySelector('[aria-busy="true"]');
+
+        return !spinner || spinner.offsetParent === null;
+      });
+    });
+
+    /* -------------------------------------------------------
+       LET UI STABILIZE
+    ------------------------------------------------------- */
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    await page.evaluate(() => document.body.offsetHeight);
+
+    /* -------------------------------------------------------
+       PRINT CSS (CRITICAL)
+    ------------------------------------------------------- */
+    await page.emulateMediaType('print');
+
+    await page.addStyleTag({
+      content: `
+        body { margin:0; padding:0; background:white !important; }
+        table { width:100%; border-collapse:collapse; page-break-inside:auto; }
+        tr { page-break-inside:avoid; }
+        thead { display:table-header-group; }
+        canvas { display:block; page-break-inside:avoid; }
+        .loading, .spinner { display:none !important; }
+        @page {
+          margin-top: 70px; /* Matches the margin in page.pdf */
+          margin-bottom: 60px;
+        }
+        input[value="Done"], 
+        input[value="done"],
+        button[value="Done"] {
+          display:none !important;
+        }
+          `
+    });
+
+    const PDF_MARGIN = 40;
+    const PAGE_WIDTH = 595 - 2 * PDF_MARGIN;
+    const PAGE_HEIGHT = 842 - 2 * PDF_MARGIN;
+
+    /* -------------------------------------------------------
+       FILL FIELDS + RENDER FILES & SIGNATURES (SYNC SAFE)
+    ------------------------------------------------------- */
+    await page.evaluate(async (fields, fieldData, dateDisplayFormat, PAGE_WIDTH, PAGE_HEIGHT) => {
+
+      const waitImage = (img, timeout = 15000) =>
+        new Promise(resolve => {
+          const done = () => resolve();
+
+          if (img.complete) return done();
+
+          const t = setTimeout(done, timeout);
+          img.onload = () => { clearTimeout(t); done(); };
+          img.onerror = () => { clearTimeout(t); done(); };
+        });
+
+      // HELPER: Simple Date Formatter
+      const formatDataValue = (rawVal, fmt) => {
+        if (!fmt || typeof fmt !== 'string') return rawVal;
+        const d = new Date(rawVal);
+        if (isNaN(d.getTime())) return rawVal; // Return original if not a valid date
+
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const yyyy = d.getFullYear();
+        const yy = String(yyyy).slice(-2);
+
+        // Replace tokens in the format string
+        return fmt
+          .replace(/YYYY/g, yyyy)
+          .replace(/yyyy/g, yyyy)
+          .replace(/YY/g, yy)
+          .replace(/yy/g, yy)
+          .replace(/MM/g, mm)
+          .replace(/mm/g, mm)
+          .replace(/DD/g, dd)
+          .replace(/dd/g, dd); // Handle lowercase dd too
+      };
+
+      // Fill form fields
+      for (const [name, value] of Object.entries(fields)) {
+        const el = document.querySelector(`[name="${name}"]`) || document.getElementById(name);
+        if (!el) continue;
+
+
+        // IMPORTANT: never set value for file inputs (browser security restriction)
+        if (el.tagName === 'INPUT' && el.type === 'file') {
+          continue;
+        }
+        if (name.toLowerCase().includes('date') || name.toLowerCase().includes('date')) {
+          // Force type to text so the browser doesn't use its internal US-format display
+          el.type = 'text';
+          // Convert the raw date to the requested format
+          el.value = formatDataValue(value ?? '', dateDisplayFormat);
+          continue;
+        }
+        if (el.tagName === 'SELECT') {
+          el.innerHTML = `<option selected>${value}</option>`;
+        } else if (el.type === 'checkbox' || el.type === 'radio') {
+          el.checked = value === true || value === 'Yes' || value === 'true' || value === 'On' || value === 'on' || value === 'yes';
+        } else if (el.tagName === 'TEXTAREA') {
+          el.value = value ?? '';
+          el.innerHTML = value ?? '';
+          // Ensure text wraps properly in PDF
+          el.style.whiteSpace = 'pre-wrap';
+          el.style.wordBreak = 'break-word';
+          el.style.wordWrap = 'break-word';
+        } else if ('value' in el) {
+          el.value = value ?? '';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
+
+      // File inputs → images
+      const fileInputs = [...document.querySelectorAll('input[type="file"]')];
+
+      for (const input of fileInputs) {
+        const key = input.name;
+        const data = fieldData[key];
+        if (!data || !data.startsWith('data:image')) continue;
+
+        input.style.display = 'none';
+
+        const img = new Image();
+        img.src = data;
+        await waitImage(img);
+
+        const scale = Math.min(1, PAGE_WIDTH / img.width);
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        input.after(canvas);
+      }
+
+      // Signature canvases
+      const sigCanvases = [...document.querySelectorAll('canvas[name]')];
+
+      for (const canvas of sigCanvases) {
+        const key = canvas.getAttribute('name');
+        const data = fieldData[key];
+        if (!data) continue;
+
+        const img = new Image();
+        img.src = data;
+        await waitImage(img);
+
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      }
+
+      // ✅ FIX: Ensure textarea values are visible in PDF
+      const textareas = document.querySelectorAll('textarea');
+      textareas.forEach(el => {
+        /* const div = document.createElement('div');
+         div.textContent = el.value || '';
+
+         div.style.whiteSpace = 'pre-wrap';
+         div.style.wordBreak = 'break-word';
+         div.style.width = '100%';
+         div.style.fontSize = window.getComputedStyle(el).fontSize;
+         div.style.fontFamily = window.getComputedStyle(el).fontFamily; */
+
+        el.style.height = 'auto';
+        // Set height to match the internal content height
+        el.style.height = (el.scrollHeight) + 'px';
+        // el.replaceWith(div);
+      });
+
+    }, fields, fieldData, dateDisplayFormat, PAGE_WIDTH, PAGE_HEIGHT);
+
+    /* -------------------------------------------------------
+       FINAL WAIT (VERY IMPORTANT)
+    ------------------------------------------------------- */
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+
+    /* -------------------------------------------------------
+       GENERATE PDF
+    ------------------------------------------------------- */
+    const pdf = await page.pdf({
+      format: 'A4',
+      //landscape: true,
+      scale: 0.9,
+      printBackground: true,
+      preferCSSPageSize: true,
+      margin: { top: '70px', bottom: '60px', left: '40px', right: '40px' },
+      displayHeaderFooter: true,
+      headerTemplate: `<div style="
+  width:100%;
+  font-family: Arial, sans-serif;
+  font-size:10px;
+  color:#333;
+  padding:6px 40px;
+  box-sizing:border-box;
+">
+  
+  <table style="width:100%; border-bottom:1px solid #e5e7eb; padding-bottom:6px;">
+    <tr>
+      <td style="text-align:center; vertical-align:middle;">
+        <div style="font-size:11px; color:#6b7280;">
+          
+          <span style="font-weight:550;">Form Name:</span>
+          <span style="font-weight:500;">${headerInfo?.formName || 'N/A'}</span>
+
+          <span style="font-weight:550;">&nbsp;&nbsp; User:</span>
+          <span style="font-weight:500;">${headerInfo?.user || 'N/A'}</span>
+
+          <span style="font-weight:550;">&nbsp;&nbsp; Time:</span>
+          <span style="font-weight:500;">${headerInfo?.date || 'N/A'}</span>
+
+          <span style="font-weight:550;">&nbsp;&nbsp; Location:</span>
+          <span style="font-weight:500;">${headerInfo?.location || 'N/A'}</span>
+
+        </div>    
+      </td>
+    </tr>
+  </table>
+
+</div>`,
+      footerTemplate: `
+        <div style="font-size:10px;width:100%;text-align:center;">
+          Page <span class="pageNumber"></span> of <span class="totalPages"></span>
+        </div>`
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="document-${Date.now()}.pdf"`);
+    res.status(200).end(pdf);
+
+  } catch (err) {
+    console.error('PDF ERROR:', err);
+    res.status(500).json({ error: 'PDF generation failed', message: err.message });
+  } finally {
+    if (browser) await browser.close();
+  }
+});
 
 /**
  * Batch PDF generation endpoint (returns a ZIP file)
